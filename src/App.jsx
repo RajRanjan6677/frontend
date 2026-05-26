@@ -1,243 +1,228 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-const API_ROOT = 'https://backend-adk0.onrender.com/bfhl/tasks'; // Replace with live Render deployment target configuration
+const API_BASE_URL = 'https://backend-adk0.onrender.com/tickets'; 
 
 function App() {
-  const [tasks, setTasks] = useState([]);
+  const [tickets, setTickets] = useState([]);
   const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [flightSubmission, setFlightSubmission] = useState(false);
-  const [appError, setAppError] = useState('');
+  const [filterPriority, setFilterPriority] = useState('');
+  const [filterBreached, setFilterBreached] = useState(false);
+  
+  const [showModal, setShowModal] = useState(false);
   const [formError, setFormError] = useState('');
+  const [formData, setFormData] = useState({
+    subject: '',
+    description: '',
+    customerEmail: '',
+    priority: 'low'
+  });
 
-  // Matrix Filtering Configurations
-  const [statusFilter, setStatusFilter] = useState('');
-  const [minImportance, setMinImportance] = useState(1);
-
-  const [form, setForm] = useState({ title: '', description: '', importance: 3, dueDate: '' });
-
-  const fetchCoreMetrics = async () => {
+  const fetchTickets = async () => {
     try {
-      const res = await fetch(`${API_ROOT}/stats`);
-      if (res.ok) {
-        const data = await res.json();
-        setStats(data);
-      }
+      const params = new URLSearchParams();
+      if (filterPriority) params.append('priority', filterPriority);
+      if (filterBreached) params.append('breached', 'true');
+
+      const res = await fetch(`${API_BASE_URL}?${params.toString()}`);
+      const data = await res.json();
+      if (res.ok) setTickets(data);
     } catch (err) {
-      console.error("Metric aggregation offline.");
+      console.error('Error fetching tickets', err);
     }
   };
 
-  const fetchTaskQueue = async () => {
-    setLoading(true);
-    setAppError('');
+  const fetchStats = async () => {
     try {
-      const queryParams = new URLSearchParams();
-      if (statusFilter) queryParams.append('status', statusFilter);
-      if (minImportance > 1) queryParams.append('minImportance', minImportance);
-
-      const res = await fetch(`${API_ROOT}?${queryParams.toString()}`);
+      const res = await fetch(`${API_BASE_URL}/stats`);
       const data = await res.json();
-      if (res.ok) {
-        setTasks(data);
-      } else {
-        setAppError(data.error || 'Failed to sync queue data.');
-      }
+      if (res.ok) setStats(data);
     } catch (err) {
-      setAppError('Target operational API is offline.');
-    } finally {
-      setLoading(false);
+      console.error('Error fetching stats', err);
     }
   };
 
   useEffect(() => {
-    fetchTaskQueue();
-    fetchCoreMetrics();
-  }, [statusFilter, minImportance]);
+    fetchTickets();
+    fetchStats();
+  }, [filterPriority, filterBreached]);
 
-  const handleCreate = async (e) => {
+  const handleInputChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleCreateTicket = async (e) => {
     e.preventDefault();
     setFormError('');
-    setFlightSubmission(true);
-
     try {
-      const res = await fetch(API_ROOT, {
+      const res = await fetch(API_BASE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form)
+        body: JSON.stringify(formData)
       });
       const data = await res.json();
-
+      
       if (!res.ok) {
-        setFormError(data.error || 'Validation checkpoint failed.');
+        setFormError(data.error || 'Failed to create ticket.');
       } else {
-        setForm({ title: '', description: '', importance: 3, dueDate: '' });
-        fetchTaskQueue();
-        fetchCoreMetrics();
+        setShowModal(false);
+        setFormData({ subject: '', description: '', customerEmail: '', priority: 'low' });
+        fetchTickets();
+        fetchStats();
       }
     } catch (err) {
-      setFormError('Network communication error.');
-    } finally {
-      setFlightSubmission(false);
+      setFormError('Network error. Try again.');
     }
   };
 
-  const handleCompleteState = async (id) => {
+  const handleTransition = async (id, nextStatus) => {
     try {
-      const res = await fetch(`${API_ROOT}/${id}`, {
+      const res = await fetch(`${API_BASE_URL}/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'completed' })
+        body: JSON.stringify({ status: nextStatus })
       });
       if (res.ok) {
-        fetchTaskQueue();
-        fetchCoreMetrics();
+        fetchTickets();
+        fetchStats();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Transition failed');
       }
     } catch (err) {
       console.error(err);
     }
   };
 
-  const handleDeleteRecord = async (id) => {
-    if (!window.confirm("Purge this task permanently?")) return;
-    try {
-      const res = await fetch(`${API_ROOT}/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchTaskQueue();
-        fetchCoreMetrics();
-      }
-    } catch (err) {
-      console.error(err);
-    }
+  const formatAge = (mins) => {
+    if (mins < 60) return `${mins}m`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${h}h ${m}m`;
   };
 
-  const getHumanReadableDate = (dateString) => {
-    const diff = new Date(dateString) - new Date();
-    const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
-    if (days < 0) return 'Overdue';
-    if (days === 0) return 'Due today';
-    return `in ${days} day${days > 1 ? 's' : ''}`;
+  const statuses = ['open', 'in_progress', 'resolved', 'closed'];
+
+  const getTransitions = (currentStatus) => {
+    switch(currentStatus) {
+      case 'open': return { forward: 'in_progress', backward: null };
+      case 'in_progress': return { forward: 'resolved', backward: 'open' };
+      case 'resolved': return { forward: 'closed', backward: 'in_progress' };
+      case 'closed': return { forward: null, backward: 'resolved' };
+      default: return { forward: null, backward: null };
+    }
   };
 
   return (
-    <div className="dashboard-container">
-      <header style={{ marginBottom: '30px' }}>
-        <h2 style={{ margin: 0, fontSize: '26px' }}>TaskFlow Engine</h2>
-        <p style={{ color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>Algorithmic Ranking & Priority Framework</p>
-      </header>
+    <div className="app-container">
+      <div className="header">
+        <h2>DeskFlow Board</h2>
+        <button className="action-btn" style={{padding: '8px 16px', background: '#4f46e5', color: 'white'}} onClick={() => setShowModal(true)}>
+          + Create Ticket
+        </button>
+      </div>
 
       {stats && (
-        <div className="stats-grid">
-          <div className="stat-card"><h4>Volume</h4><p>{stats.totalTasks}</p></div>
-          <div className="stat-card"><h4>Pending</h4><p>{stats.pendingTasks}</p></div>
-          <div className="stat-card"><h4>Resolved</h4><p>{stats.completedTasks}</p></div>
-          <div className="stat-card"><h4>Avg Importance</h4><p>{stats.averageImportance}</p></div>
-          <div className="stat-card" style={{ borderColor: stats.overdueTasks > 0 ? 'var(--danger-color)' : '' }}>
-            <h4 style={{ color: stats.overdueTasks > 0 ? 'var(--danger-color)' : '' }}>Overdue Breach</h4>
-            <p style={{ color: stats.overdueTasks > 0 ? 'var(--danger-color)' : '' }}>{stats.overdueTasks}</p>
+        <div className="stats-strip">
+          <div className="stat-item">Open: <span>{stats.statusCounts.open}</span></div>
+          <div className="stat-item">In Progress: <span>{stats.statusCounts.in_progress}</span></div>
+          <div className="stat-item">Resolved: <span>{stats.statusCounts.resolved}</span></div>
+          <div className="stat-item">Closed: <span>{stats.statusCounts.closed}</span></div>
+          <div className="stat-item" style={{marginLeft: 'auto', color: 'var(--urg-color)'}}>
+            Active SLA Breaches: <strong>{stats.openBreachedCount}</strong>
           </div>
         </div>
       )}
 
-      {appError && <div className="inline-error">{appError}</div>}
+      <div className="controls">
+        <label>Priority Filter:</label>
+        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)}>
+          <option value="">All Priorities</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </select>
 
-      <div className="workspace-split">
-        <aside className="sticky-panel">
-          <h3 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>Register Activity</h3>
-          {formError && <div className="inline-error">{formError}</div>}
-          <form onSubmit={handleCreate}>
-            <div className="input-block">
-              <label>Task Title</label>
-              <input type="text" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} required />
-            </div>
-            <div className="input-block">
-              <label>Description Context</label>
-              <textarea rows="3" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
-            </div>
-            <div className="input-block">
-              <label>Importance Matrix Assignment</label>
-              <select value={form.importance} onChange={e => setForm({ ...form, importance: parseInt(e.target.value, 10) })}>
-                {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>Tier {v}</option>)}
-              </select>
-            </div>
-            <div className="input-block">
-              <label>Deadline Target</label>
-              <input type="date" value={form.dueDate} onChange={e => setForm({ ...form, dueDate: e.target.value })} required />
-            </div>
-            <button type="submit" disabled={flightSubmission} className="action-cta">
-              {flightSubmission ? 'Processing Transaction...' : 'Commit Core Schema'}
-            </button>
-          </form>
-        </aside>
-
-        <main>
-          <div className="filters-row">
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <label style={{ fontSize: '14px', fontWeight: 600 }}>Workflow Filter:</label>
-              <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-                <option value="">All Standings</option>
-                <option value="pending">Pending</option>
-                <option value="completed">Completed</option>
-              </select>
-            </div>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginLeft: 'auto' }}>
-              <label style={{ fontSize: '14px', fontWeight: 600 }}>Min Importance ({minImportance}):</label>
-              <input type="range" min="1" max="5" value={minImportance} onChange={e => setMinImportance(parseInt(e.target.value, 10))} />
-            </div>
-          </div>
-
-          {loading ? (
-            <p style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>Synchronizing cluster registries...</p>
-          ) : (
-            <div className="task-stack">
-              {tasks.length === 0 ? (
-                <div style={{ background: 'white', textAlign: 'center', padding: '40px', borderRadius: '8px', border: '1px solid var(--line-border)' }}>
-                  <p style={{ color: 'var(--text-secondary)', margin: 0 }}>No records returned matching runtime parameters.</p>
-                </div>
-              ) : (
-                tasks.map(task => {
-                  const isHighPriority = task.priorityScore >= 50;
-                  return (
-                    <div key={task._id} className={`task-card-item ${isHighPriority ? 'critical-priority' : ''} ${task.status === 'completed' ? 'state-completed' : ''}`}>
-                      <div style={{ width: '70%' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-                          <h4 style={{ margin: 0, fontSize: '16px' }}>{task.title}</h4>
-                          {isHighPriority && task.status === 'pending' && (
-                            <span style={{ background: '#fef2f2', color: 'var(--danger-color)', fontSize: '11px', fontWeight: 700, padding: '2px 6px', borderRadius: '4px', border: '1px solid #fca5a5' }}>
-                              CRITICAL THRESHOLD
-                            </span>
-                          )}
-                        </div>
-                        {task.description && <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: 'var(--text-secondary)' }}>{task.description}</p>}
-                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                          Importance: <strong style={{ color: 'var(--text-primary)' }}>{task.importance}/5</strong> | Due: <strong>{getHumanReadableDate(task.dueDate)}</strong>
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                        <div className={`score-tag ${isHighPriority ? 'high-score' : ''}`}>
-                          Score: {task.priorityScore}
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          {task.status === 'pending' && (
-                            <button onClick={() => handleCompleteState(task._id)} style={{ padding: '6px 12px', background: '#ecfdf5', color: '#065f46', border: '1px solid #a7f3d0', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
-                              Resolve
-                            </button>
-                          )}
-                          <button onClick={() => handleDeleteRecord(task._id)} style={{ padding: '6px 12px', background: 'white', color: 'var(--danger-color)', border: '1px solid var(--line-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                            Purge
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
-        </main>
+        <label style={{marginLeft: '16px'}}>
+          <input type="checkbox" checked={filterBreached} onChange={(e) => setFilterBreached(e.target.checked)} />
+          SLA Breached Only
+        </label>
       </div>
+
+      <div className="board">
+        {statuses.map(status => {
+          const statusTickets = tickets.filter(t => t.status === status);
+          return (
+            <div key={status} className="column">
+              <h3>{status.replace('_', ' ')} ({statusTickets.length})</h3>
+              {statusTickets.map(ticket => {
+                const moves = getTransitions(ticket.status);
+                return (
+                  <div key={ticket._id} className={`ticket-card ${ticket.slaBreached ? 'breached' : ''}`}>
+                    <span className={`priority-badge ${ticket.priority}`}>{ticket.priority}</span>
+                    <h4 style={{margin: '4px 0 8px 0', fontSize: '15px'}}>{ticket.subject}</h4>
+                    <div style={{fontSize: '12px', color: '#64748b'}}>
+                      Age: {formatAge(ticket.ageMinutes)}
+                      {ticket.slaBreached && <span style={{color: 'var(--urg-color)', marginLeft: '8px', fontWeight: 'bold'}}>! SLA OUT</span>}
+                    </div>
+                    
+                    <div className="card-actions">
+                      {moves.backward ? (
+                        <button className="action-btn" onClick={() => handleTransition(ticket._id, moves.backward)}>
+                          ← {moves.backward.replace('_', ' ')}
+                        </button>
+                      ) : <div />}
+                      
+                      {moves.forward ? (
+                        <button className="action-btn" onClick={() => handleTransition(ticket._id, moves.forward)}>
+                          {moves.forward.replace('_', ' ')} →
+                        </button>
+                      ) : <div />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+
+      {showModal && (
+        <div className="modal-backdrop">
+          <div className="modal-content">
+            <h3>New Support Ticket</h3>
+            {formError && <div className="error-banner">{formError}</div>}
+            <form onSubmit={handleCreateTicket}>
+              <div className="form-group">
+                <label>Subject</label>
+                <input type="text" name="subject" value={formData.subject} onChange={handleInputChange} required />
+              </div>
+              <div className="form-group">
+                <label>Description</label>
+                <textarea name="description" rows="3" value={formData.description} onChange={handleInputChange} required />
+              </div>
+              <div className="form-group">
+                <label>Customer Email</label>
+                <input type="email" name="customerEmail" value={formData.customerEmail} onChange={handleInputChange} required />
+              </div>
+              <div className="form-group">
+                <label>Priority</label>
+                <select name="priority" value={formData.priority} onChange={handleInputChange}>
+                  <option value="low">Low (72h Target)</option>
+                  <option value="medium">Medium (24h Target)</option>
+                  <option value="high">High (4h Target)</option>
+                  <option value="urgent">Urgent (1h Target)</option>
+                </select>
+              </div>
+              <div style={{display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '20px'}}>
+                <button type="button" className="action-btn" onClick={() => setShowModal(false)}>Cancel</button>
+                <button type="submit" className="action-btn" style={{background: '#4f46e5', color: 'white'}}>Submit Ticket</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
